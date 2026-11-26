@@ -10,8 +10,8 @@ android {
         applicationId 'com.bhchmv.darklauncher'
         minSdk 26
         targetSdk 34
-        versionCode 1
-        versionName '1.0'
+        versionCode 2
+        versionName '1.1'
     }
 
     // Dedicated signing key for this app only, kept in the repo so every
