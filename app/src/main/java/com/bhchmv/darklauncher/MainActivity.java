@@ -3,13 +3,17 @@ package com.bhchmv.darklauncher;
 import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.widget.FrameLayout;
 
 import java.util.ArrayList;
@@ -45,6 +49,7 @@ public class MainActivity extends Activity {
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
         setContentView(root);
+        hideStatusBar();
         Controls.init(this);
         reloadApps();
     }
@@ -104,12 +109,35 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        hideStatusBar();
         if (term != null) {
             reloadApps();
             term.onResume();
         }
         handler.removeCallbacks(ticker);
         handler.post(ticker);
+    }
+
+    /** Hides the phone's own time/battery bar while the launcher is showing. */
+    @SuppressWarnings("deprecation")
+    private void hideStatusBar() {
+        Window w = getWindow();
+        if (Build.VERSION.SDK_INT >= 30) {
+            WindowInsetsController c = w.getInsetsController();
+            if (c != null) {
+                c.hide(WindowInsets.Type.statusBars());
+                c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        } else {
+            w.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) hideStatusBar();
     }
 
     @Override

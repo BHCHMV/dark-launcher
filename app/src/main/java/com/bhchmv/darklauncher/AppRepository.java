@@ -37,8 +37,16 @@ final class AppRepository {
             ActivityInfo ai = ri.activityInfo;
             if (ai == null || self.equals(ai.packageName)) continue;
             CharSequence label = ri.loadLabel(pm);
-            found.add(new AppEntry(label == null ? ai.packageName : label.toString(),
-                    ai.packageName, new ComponentName(ai.packageName, ai.name)));
+            android.graphics.drawable.Drawable icon;
+            try {
+                icon = ri.loadIcon(pm);
+            } catch (Exception ex) {
+                icon = null;
+            }
+            AppEntry e = new AppEntry(label == null ? ai.packageName : label.toString(),
+                    ai.packageName, new ComponentName(ai.packageName, ai.name), icon);
+            IconUtil.small(ctx, e); // render off the main thread
+            found.add(e);
         }
         Collections.sort(found, (a, b) -> a.label.compareToIgnoreCase(b.label));
 

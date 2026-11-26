@@ -3,6 +3,10 @@
 A dark, Linux-terminal-style home screen for Android, made for a Samsung Galaxy A55.
 
 - **Tabs**: `1:apps`, `2:settings` and `3:system`. Tap a tab or swipe left or right to switch.
+- **Own tabs**: tap **+** in the tab bar, name the tab, and pick up to 10 apps. They show as big icons. You can have up to 6 tabs.
+- **Icons** next to every app (switch them to green in Settings → TABS & ICONS).
+- **No phone status bar** on the home screen. Time and battery are in the tab bar instead.
+- **Lock screen**: Settings → LOCK SCREEN sets a terminal-style lock screen picture.
 - **Swipe down** for a terminal-style quick panel with brightness, volume, flashlight, sound mode, rotation, Wi-Fi, Bluetooth and notifications.
 - **Apps keep their places**: new apps go to the bottom, and coming back from an app leaves the screen as you left it. Hold an app to move it up, down, to the top or to the bottom, or to uninstall it.
 - **Settings tab**: terminal controls that change the phone directly. Extra Samsung pages are listed under *MORE*.

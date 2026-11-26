@@ -17,6 +17,7 @@ import android.provider.Settings;
 import android.text.InputType;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
+import android.text.TextUtils;
 import android.text.style.ForegroundColorSpan;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
@@ -27,6 +28,8 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -39,6 +42,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
@@ -74,9 +78,14 @@ final class TerminalHome {
     private final View scrim;
     private final ScrollView scroll;
     private final EditText input;
-    private final TextView[] tabViews = new TextView[3];
+    private final List<TextView> tabViews = new ArrayList<>();
+    private final LinearLayout tabStrip;
+    private final HorizontalScrollView tabScroll;
+    private final TabStore store;
     private final TextView status;
     private final Map<String, Runnable> menu = new HashMap<>();
+    /** When set, the next typed line is an answer (e.g. a tab name), not a command. */
+    private Consumer<String> pending;
 
     /** Where line() writes: the terminal output or the quick panel. */
     private LinearLayout target;
@@ -104,21 +113,17 @@ final class TerminalHome {
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
         bar.setBackgroundColor(0xFF101010);
-        for (int i = 0; i < 3; i++) {
-            TextView t = mono(" " + (i + 1) + ":" + TAB_NAMES[i] + " ", DIM);
-            t.setPadding(dp(4), dp(9), dp(4), dp(9));
-            final int idx = i;
-            t.setOnClickListener(v -> {
-                if (!busy) showTab(idx, true);
-            });
-            tabViews[i] = t;
-            bar.addView(t);
-        }
-        status = mono("", GRAY);
-        status.setGravity(Gravity.END);
-        status.setPadding(0, 0, dp(10), 0);
+        store = new TabStore(a);
+        tabScroll = new HorizontalScrollView(a);
+        tabScroll.setHorizontalScrollBarEnabled(false);
+        tabStrip = new LinearLayout(a);
+        tabStrip.setOrientation(LinearLayout.HORIZONTAL);
+        tabScroll.addView(tabStrip);
+        bar.addView(tabScroll, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        status = mono("", WHITE);
+        status.setPadding(dp(8), dp(9), dp(10), dp(9));
         status.setOnClickListener(v -> openPanel());
-        bar.addView(status, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        bar.addView(status);
         column.addView(bar);
         View rule = new View(a);
         rule.setBackgroundColor(0xFF1F5F33);
@@ -200,12 +205,12 @@ final class TerminalHome {
             public void onSwipe(int dir) {
                 if (dir == SwipeLayout.DOWN) openPanel();
                 else if (dir == SwipeLayout.UP) closePanel();
-                else if (dir == SwipeLayout.LEFT) showTab((tab + 1) % 3, true);
-                else showTab((tab + 2) % 3, true);
+                else if (dir == SwipeLayout.LEFT) showTab((tab + 1) % tabCount(), true);
+                else showTab((tab + tabCount() - 1) % tabCount(), true);
             }
         });
 
-        updateTabBar();
+        rebuildTabBar();
         tick();
         boot();
     }
@@ -363,18 +368,52 @@ final class TerminalHome {
         busy = false;
         out.removeAllViews();
         menu.clear();
+        pending = null;
         target = out;
         scroll.scrollTo(0, 0);
     }
 
     // ===================== tabs =====================
 
+    private int tabCount() {
+        return 3 + store.tabs.size();
+    }
+
+    private String tabName(int i) {
+        return i < 3 ? TAB_NAMES[i] : store.tabs.get(i - 3).name;
+    }
+
+    private void rebuildTabBar() {
+        tabStrip.removeAllViews();
+        tabViews.clear();
+        for (int i = 0; i < tabCount(); i++) {
+            TextView t = mono(" " + (i + 1) + ":" + tabName(i) + " ", DIM);
+            t.setPadding(dp(4), dp(9), dp(4), dp(9));
+            final int idx = i;
+            t.setOnClickListener(v -> {
+                if (!busy) showTab(idx, true);
+            });
+            tabViews.add(t);
+            tabStrip.addView(t);
+        }
+        if (store.tabs.size() < TabStore.MAX_TABS) {
+            TextView plus = mono(" + ", CYAN);
+            plus.setPadding(dp(6), dp(9), dp(6), dp(9));
+            plus.setOnClickListener(v -> {
+                if (!busy) newTab();
+            });
+            tabStrip.addView(plus);
+        }
+        updateTabBar();
+    }
+
     private void updateTabBar() {
-        for (int i = 0; i < 3; i++) {
-            TextView t = tabViews[i];
+        for (int i = 0; i < tabViews.size(); i++) {
+            TextView t = tabViews.get(i);
             if (i == tab) {
                 t.setBackgroundColor(GREEN);
                 t.setTextColor(Color.BLACK);
+                tabScroll.post(() -> tabScroll.smoothScrollTo(Math.max(0, t.getLeft() - dp(40)), 0));
             } else {
                 t.setBackgroundColor(Color.TRANSPARENT);
                 t.setTextColor(DIM);
@@ -383,17 +422,58 @@ final class TerminalHome {
     }
 
     private void showTab(int t, boolean animate) {
+        if (t >= tabCount()) t = 0;
         tab = t;
         inAppMenu = false;
         updateTabBar();
         clearOut();
-        Runnable render = t == 0 ? () -> renderApps(null) : t == 1 ? this::renderSettings : this::renderSystem;
-        if (animate) {
-            typeAndRun(TAB_CMDS[t], render);
+        Runnable render;
+        String cmd;
+        if (t < 3) {
+            render = t == 0 ? () -> renderApps(null) : t == 1 ? this::renderSettings : this::renderSystem;
+            cmd = TAB_CMDS[t];
         } else {
-            echo(TAB_CMDS[t]);
+            int ci = t - 3;
+            render = () -> renderCustom(ci);
+            cmd = "ls ~/" + store.tabs.get(ci).name;
+        }
+        if (animate) {
+            typeAndRun(cmd, render);
+        } else {
+            echo(cmd);
             render.run();
         }
+    }
+
+    /** A list row with the app's icon: "  12 [icon] Chrome". */
+    private LinearLayout appRow(String prefix, AppEntry e, int labelColor) {
+        LinearLayout r = new LinearLayout(a);
+        r.setOrientation(LinearLayout.HORIZONTAL);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        r.setPadding(0, dp(4), 0, dp(4));
+        r.addView(mono(prefix, GRAY));
+        ImageView iv = new ImageView(a);
+        iv.setImageBitmap(IconUtil.small(a, e));
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(24), dp(24));
+        ilp.setMargins(0, 0, dp(10), 0);
+        r.addView(iv, ilp);
+        TextView label = mono(e.label, labelColor);
+        label.setSingleLine(true);
+        label.setEllipsize(TextUtils.TruncateAt.END);
+        r.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        r.setBackground(IconUtil.selectable(a));
+        target.addView(r);
+        return r;
+    }
+
+    private static TextView rowLabel(LinearLayout row) {
+        return (TextView) row.getChildAt(2);
+    }
+
+    private void onTap(View v, Runnable r) {
+        v.setOnClickListener(x -> {
+            if (!busy) r.run();
+        });
     }
 
     private void showAppsFocused(AppEntry focus) {
@@ -409,7 +489,7 @@ final class TerminalHome {
         clearOut();
         busy = true;
         List<Runnable> steps = new ArrayList<>();
-        steps.add(() -> line("darkOS 1.1 (tty1) on " + Build.MANUFACTURER + " " + Build.MODEL, GRAY));
+        steps.add(() -> line("darkOS 1.2 (tty1) on " + Build.MANUFACTURER + " " + Build.MODEL, GRAY));
         steps.add(() -> line("[  OK  ] mounted /home/a55", DIM));
         steps.add(() -> line("[  OK  ] indexed " + a.getApps().size() + " apps", DIM));
         steps.add(() -> line("[  OK  ] started dark shell", DIM));
@@ -420,6 +500,7 @@ final class TerminalHome {
         steps.add(this::blank);
         steps.add(() -> line("  swipe ↓ quick panel   swipe ← → tabs", GRAY));
         steps.add(() -> line("  hold an app to move it or uninstall it", GRAY));
+        steps.add(() -> line("  tap + in the tab bar to make your own tab", GRAY));
         steps.add(() -> {
             busy = false;
             if (!LauncherSettings.isDefaultHome(a)) {
@@ -439,17 +520,16 @@ final class TerminalHome {
         View focusView = null;
         for (int i = 0; i < apps.size(); i++) {
             AppEntry e = apps.get(i);
-            TextView t = line(String.format(Locale.US, "  %3d  %s", i + 1, e.label), WHITE);
-            t.setPadding(0, dp(5), 0, dp(5));
-            clickable(t, () -> launch(e));
-            t.setOnLongClickListener(v -> {
+            LinearLayout r = appRow(String.format(Locale.US, "  %3d ", i + 1), e, WHITE);
+            onTap(r, () -> launch(e));
+            r.setOnLongClickListener(v -> {
                 if (!busy) appMenu(e, null);
                 return true;
             });
             menu.put(String.valueOf(i + 1), () -> launch(e));
             if (e == focus) {
-                focusView = t;
-                t.setTextColor(GREEN);
+                focusView = r;
+                rowLabel(r).setTextColor(GREEN);
             }
         }
         line("  tap to open · hold for options · or type a name", GRAY);
@@ -483,6 +563,7 @@ final class TerminalHome {
         option("5", "bottom", "move to the bottom", () -> move(e, a.getApps().size() - 1));
         option("6", "info", "app info (Samsung page)", () -> AppActions.appInfo(a, e));
         option("7", "uninstall", "remove this app", () -> AppActions.uninstall(a, e));
+        option("8", "addtab", "put it in one of your tabs", () -> pickTabFor(e));
         option("0", "back", "back to the app list", () -> showAppsFocused(e));
     }
 
@@ -491,6 +572,292 @@ final class TerminalHome {
         to = Math.max(0, Math.min(n - 1, to));
         a.moveApp(e, to);
         appMenu(e, "[  OK  ] moved to position " + (to + 1));
+    }
+
+    // ----- custom tabs -----
+
+    private AppEntry byKey(String key) {
+        for (AppEntry e : a.getApps()) if (e.key().equals(key)) return e;
+        return null;
+    }
+
+    /** Apps in a tab, dropping any that were uninstalled. */
+    private List<AppEntry> tabApps(TabStore.Tab t) {
+        List<AppEntry> list = new ArrayList<>();
+        List<String> keep = new ArrayList<>();
+        for (String k : t.apps) {
+            AppEntry e = byKey(k);
+            if (e != null) {
+                list.add(e);
+                keep.add(k);
+            }
+        }
+        if (keep.size() != t.apps.size() && !a.getApps().isEmpty()) {
+            t.apps.clear();
+            t.apps.addAll(keep);
+            store.save();
+        }
+        return list;
+    }
+
+    private View bigCell(int n, AppEntry e) {
+        LinearLayout cell = new LinearLayout(a);
+        cell.setOrientation(LinearLayout.VERTICAL);
+        cell.setGravity(Gravity.CENTER_HORIZONTAL);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xFF050805);
+        bg.setStroke(dp(1), 0xFF1F5F33);
+        cell.setBackground(bg);
+        cell.setForeground(IconUtil.selectable(a));
+        cell.setPadding(dp(4), dp(12), dp(4), dp(10));
+        ImageView iv = new ImageView(a);
+        iv.setImageBitmap(IconUtil.big(a, e));
+        cell.addView(iv, new LinearLayout.LayoutParams(dp(64), dp(64)));
+        TextView label = mono(n + " " + e.label, WHITE);
+        label.setTextSize(11);
+        label.setSingleLine(true);
+        label.setEllipsize(TextUtils.TruncateAt.END);
+        label.setGravity(Gravity.CENTER);
+        label.setPadding(0, dp(8), 0, 0);
+        cell.addView(label, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        return cell;
+    }
+
+    private void renderCustom(int ci) {
+        TabStore.Tab t = store.tabs.get(ci);
+        List<AppEntry> apps = tabApps(t);
+        section(t.name.toUpperCase(Locale.ROOT) + " (" + apps.size() + "/" + TabStore.MAX_APPS + ")");
+        if (apps.isEmpty()) {
+            line("  (empty) add up to " + TabStore.MAX_APPS + " apps with [a] below", GRAY);
+        } else {
+            blank();
+            LinearLayout row = null;
+            for (int i = 0; i < apps.size(); i++) {
+                if (i % 3 == 0) {
+                    row = new LinearLayout(a);
+                    row.setOrientation(LinearLayout.HORIZONTAL);
+                    out.addView(row);
+                }
+                AppEntry e = apps.get(i);
+                View cell = bigCell(i + 1, e);
+                onTap(cell, () -> launch(e));
+                cell.setOnLongClickListener(v -> {
+                    if (!busy) tabAppMenu(ci, e, null);
+                    return true;
+                });
+                row.addView(cell, cellParams(1));
+                menu.put(String.valueOf(i + 1), () -> launch(e));
+            }
+            int rem = apps.size() % 3;
+            if (rem != 0 && row != null) {
+                for (int k = rem; k < 3; k++) row.addView(new View(a), cellParams(1));
+            }
+            blank();
+            line("  tap to open · hold to move or remove", GRAY);
+        }
+        blank();
+        option("a", "add", "add or remove apps (" + apps.size() + "/" + TabStore.MAX_APPS + ")", () -> pickApps(ci));
+        option("e", "rename", "rename this tab", () -> renameTab(ci));
+        option("x", "delete", "delete this tab", () -> deleteTab(ci));
+    }
+
+    private LinearLayout.LayoutParams cellParams(int height) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0,
+                height == 1 ? ViewGroup.LayoutParams.WRAP_CONTENT : height, 1f);
+        lp.setMargins(dp(3), dp(3), dp(3), dp(3));
+        return lp;
+    }
+
+    private void tabAppMenu(int ci, AppEntry e, String message) {
+        TabStore.Tab t = store.tabs.get(ci);
+        int idx = t.apps.indexOf(e.key());
+        if (idx < 0) {
+            showTab(3 + ci, false);
+            return;
+        }
+        clearOut();
+        inAppMenu = true;
+        echo("app --tab " + t.name + " \"" + e.label + "\"");
+        section(e.label);
+        line("  place " + (idx + 1) + " of " + t.apps.size() + " in " + t.name, GRAY);
+        if (message != null) line(message, DIM);
+        option("1", "open", "launch the app", () -> launch(e));
+        option("2", "left", "move one place earlier", () -> moveInTab(ci, e, idx - 1));
+        option("3", "right", "move one place later", () -> moveInTab(ci, e, idx + 1));
+        option("4", "remove", "remove from this tab", () -> {
+            t.apps.remove(e.key());
+            store.save();
+            showTab(3 + ci, false);
+        });
+        option("0", "back", "back to " + t.name, () -> showTab(3 + ci, false));
+    }
+
+    private void moveInTab(int ci, AppEntry e, int to) {
+        TabStore.Tab t = store.tabs.get(ci);
+        to = Math.max(0, Math.min(t.apps.size() - 1, to));
+        t.apps.remove(e.key());
+        t.apps.add(to, e.key());
+        store.save();
+        tabAppMenu(ci, e, "[  OK  ] moved to place " + (to + 1));
+    }
+
+    /** Tick apps on/off for a tab (max 10). */
+    private void pickApps(int ci) {
+        TabStore.Tab t = store.tabs.get(ci);
+        tabApps(t);
+        clearOut();
+        inAppMenu = true;
+        echo("edit ~/" + t.name);
+        section("PICK APPS FOR " + t.name.toUpperCase(Locale.ROOT));
+        TextView counter = line(countText(t), CYAN);
+        option("0", "done", "back to " + t.name, () -> showTab(3 + ci, false));
+        blank();
+        List<AppEntry> apps = a.getApps();
+        for (int i = 0; i < apps.size(); i++) {
+            AppEntry e = apps.get(i);
+            boolean in = t.apps.contains(e.key());
+            LinearLayout r = appRow(in ? "  [x] " : "  [ ] ", e, in ? GREEN : WHITE);
+            Runnable toggle = () -> {
+                TextView box = (TextView) r.getChildAt(0);
+                if (t.apps.contains(e.key())) {
+                    t.apps.remove(e.key());
+                    box.setText("  [ ] ");
+                    rowLabel(r).setTextColor(WHITE);
+                } else if (t.apps.size() >= TabStore.MAX_APPS) {
+                    counter.setText("  tab is full (" + TabStore.MAX_APPS + "/" + TabStore.MAX_APPS + ") — untick one first");
+                    counter.setTextColor(RED);
+                    return;
+                } else {
+                    t.apps.add(e.key());
+                    box.setText("  [x] ");
+                    rowLabel(r).setTextColor(GREEN);
+                }
+                store.save();
+                counter.setText(countText(t));
+                counter.setTextColor(CYAN);
+            };
+            onTap(r, toggle);
+            menu.put(String.valueOf(i + 1), toggle);
+        }
+        blank();
+        option("0", "done", "back to " + t.name, () -> showTab(3 + ci, false));
+    }
+
+    private String countText(TabStore.Tab t) {
+        return "  " + t.apps.size() + "/" + TabStore.MAX_APPS + " picked — tap apps to add or remove";
+    }
+
+    private void newTab() {
+        if (store.tabs.size() >= TabStore.MAX_TABS) {
+            line("  you already have " + TabStore.MAX_TABS + " tabs — delete one first", YELLOW);
+            return;
+        }
+        clearOut();
+        inAppMenu = true;
+        echo("mkdir ~/new-tab");
+        section("NEW TAB");
+        line("  type a name below and press enter", WHITE);
+        line("  (up to " + TabStore.MAX_NAME + " letters) or pick one:", GRAY);
+        blank();
+        for (String n : new String[]{"games", "social", "music", "work", "tools"}) {
+            TextView t = line("  > " + n, GREEN);
+            t.setPadding(0, dp(6), 0, dp(6));
+            clickable(t, () -> createTab(n));
+        }
+        blank();
+        option("0", "cancel", "go back", () -> showTab(tab, false));
+        pending = this::createTab;
+        focusInput();
+    }
+
+    private void createTab(String raw) {
+        String name = TabStore.cleanName(raw);
+        if (name.isEmpty()) {
+            line("  name can't be empty — try again", RED);
+            pending = this::createTab;
+            return;
+        }
+        hideKeyboard();
+        store.tabs.add(new TabStore.Tab(name));
+        store.save();
+        tab = 3 + store.tabs.size() - 1;
+        rebuildTabBar();
+        pickApps(store.tabs.size() - 1);
+    }
+
+    private void renameTab(int ci) {
+        TabStore.Tab t = store.tabs.get(ci);
+        clearOut();
+        inAppMenu = true;
+        echo("mv ~/" + t.name + " ~/...");
+        section("RENAME " + t.name.toUpperCase(Locale.ROOT));
+        line("  type the new name and press enter", WHITE);
+        option("0", "cancel", "keep the name", () -> showTab(3 + ci, false));
+        pending = raw -> {
+            String name = TabStore.cleanName(raw);
+            if (name.isEmpty()) {
+                showTab(3 + ci, false);
+                return;
+            }
+            t.name = name;
+            store.save();
+            rebuildTabBar();
+            showTab(3 + ci, false);
+        };
+        focusInput();
+    }
+
+    private void deleteTab(int ci) {
+        TabStore.Tab t = store.tabs.get(ci);
+        clearOut();
+        inAppMenu = true;
+        echo("rm -r ~/" + t.name);
+        section("DELETE " + t.name.toUpperCase(Locale.ROOT) + "?");
+        line("  the apps stay installed, only the tab goes", GRAY);
+        option("y", "yes", "delete the tab", () -> {
+            store.tabs.remove(ci);
+            store.save();
+            tab = 0;
+            rebuildTabBar();
+            showTab(0, false);
+        });
+        option("n", "no", "keep it", () -> showTab(3 + ci, false));
+    }
+
+    /** From the app list: put an app into one of your tabs. */
+    private void pickTabFor(AppEntry e) {
+        clearOut();
+        inAppMenu = true;
+        echo("cp \"" + e.label + "\" ~/...");
+        section("ADD " + e.label.toUpperCase(Locale.ROOT) + " TO");
+        if (store.tabs.isEmpty()) line("  you have no tabs yet", GRAY);
+        for (int i = 0; i < store.tabs.size(); i++) {
+            TabStore.Tab t = store.tabs.get(i);
+            boolean in = t.apps.contains(e.key());
+            String desc = in ? "already there" : t.apps.size() + "/" + TabStore.MAX_APPS;
+            option(String.valueOf(i + 1), t.name, desc, () -> {
+                if (t.apps.contains(e.key())) {
+                    line("  already in " + t.name, YELLOW);
+                } else if (t.apps.size() >= TabStore.MAX_APPS) {
+                    line("  " + t.name + " is full (" + TabStore.MAX_APPS + "/" + TabStore.MAX_APPS + ")", RED);
+                } else {
+                    t.apps.add(e.key());
+                    store.save();
+                    line("[  OK  ] added to " + t.name, DIM);
+                }
+            });
+        }
+        if (store.tabs.size() < TabStore.MAX_TABS) option("n", "new", "make a new tab", this::newTab);
+        option("0", "back", "app options", () -> appMenu(e, null));
+    }
+
+    private void focusInput() {
+        input.requestFocus();
+        input.postDelayed(() -> {
+            InputMethodManager imm = (InputMethodManager) a.getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null) imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
+        }, 150);
     }
 
     // ----- tab 2: settings -----
@@ -544,6 +911,20 @@ final class TerminalHome {
         setting("i", "about", "about phone", Settings.ACTION_DEVICE_INFO_SETTINGS);
         setting("a", "all", "all settings", Settings.ACTION_SETTINGS);
 
+        section("LOCK SCREEN");
+        option("w", "matrix", "terminal logo + falling code", () -> setLock(LockScreen.STYLE_MATRIX));
+        option("p", "plain", "terminal logo + scanlines", () -> setLock(LockScreen.STYLE_PLAIN));
+        line("  sets a terminal-style lock screen picture.", GRAY);
+        line("  Samsung still draws its clock on top; to match it", GRAY);
+        line("  go to Samsung Settings > Lock screen > Edit and", GRAY);
+        line("  pick a thin clock font in green.", GRAY);
+
+        section("TABS & ICONS");
+        option("t", "newtab", store.tabs.size() + "/" + TabStore.MAX_TABS + " own tabs — make a new one", this::newTab);
+        control("icon color", () -> IconUtil.greenIcons(a) ? "green" : "normal", "[switch]", () -> {
+            IconUtil.setGreenIcons(a, !IconUtil.greenIcons(a), a.getApps());
+        });
+
         section("LAUNCHER");
         option("h", "sethome", LauncherSettings.isDefaultHome(a) ? "already your home screen"
                 : "make darkOS your home screen", () -> LauncherSettings.requestHome(a));
@@ -555,6 +936,13 @@ final class TerminalHome {
         line("  note: Samsung's own Settings app and its pull-down", GRAY);
         line("  panel can't be restyled by other apps. Use these", GRAY);
         line("  controls and the swipe-down panel here instead.", GRAY);
+    }
+
+    private void setLock(int style) {
+        line("[ .... ] drawing lock screen ...", DIM);
+        LockScreen.apply(a, style, ok -> line(ok
+                ? "[  OK  ] lock screen set — press power to see it"
+                : "[ FAIL ] couldn't set the lock screen picture", ok ? DIM : RED));
     }
 
     private void setting(String key, String name, String desc, String action) {
@@ -634,6 +1022,8 @@ final class TerminalHome {
                 {"panel", "quick panel"},
                 {"notify", "notifications"},
                 {"battery, date", "quick info"},
+                {"newtab", "make your own tab"},
+                {"lock", "terminal lock screen"},
                 {"sethome", "make darkOS your home"},
                 {"clear", "redraw this tab"},
         };
@@ -708,6 +1098,12 @@ final class TerminalHome {
 
     private void runTyped(String raw) {
         echo(raw.trim());
+        if (pending != null) {
+            Consumer<String> p = pending;
+            pending = null;
+            p.accept(raw.trim());
+            return;
+        }
         runAndReveal(() -> execute(raw));
     }
 
@@ -732,6 +1128,8 @@ final class TerminalHome {
             case "panel": case "quick": openPanel(); return;
             case "notify": case "notifications": notifications(); return;
             case "sethome": LauncherSettings.requestHome(a); return;
+            case "newtab": case "mkdir": newTab(); return;
+            case "lock": case "lockscreen": setLock(LockScreen.STYLE_MATRIX); return;
             case "torch": case "flashlight": case "flash":
                 Controls.toggleTorch(a);
                 line(Controls.hasTorch() ? "  flashlight " + onOff(Controls.torchOn()) : "  no flashlight found", WHITE);
@@ -777,9 +1175,8 @@ final class TerminalHome {
         int n = 0;
         for (AppEntry e : found) {
             n++;
-            TextView t = line(String.format(Locale.US, "  %3d  %s", n, e.label), WHITE);
-            t.setPadding(0, dp(5), 0, dp(5));
-            clickable(t, () -> launch(e));
+            LinearLayout r = appRow(String.format(Locale.US, "  %3d ", n), e, WHITE);
+            onTap(r, () -> launch(e));
             menu.put(String.valueOf(n), () -> launch(e));
         }
     }
@@ -804,9 +1201,9 @@ final class TerminalHome {
     }
 
     void onAppsChanged() {
-        if (tab == 0 && !inAppMenu && !busy) {
+        if ((tab == 0 || tab >= 3) && !inAppMenu && !busy) {
             int y = scroll.getScrollY();
-            showTab(0, false);
+            showTab(tab, false);
             scroll.post(() -> scroll.scrollTo(0, y));
         }
     }
@@ -818,7 +1215,7 @@ final class TerminalHome {
         } else if (busy) {
             // ignore
         } else if (inAppMenu) {
-            showTab(0, false);
+            showTab(tab, false);
         } else if (tab != 0) {
             showTab(0, true);
         }
