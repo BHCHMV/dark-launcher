@@ -1,14 +1,11 @@
 package com.bhchmv.darklauncher;
 
 import android.app.Activity;
-import android.content.Intent;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.SystemClock;
-import android.provider.Settings;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -30,7 +27,6 @@ public class MainActivity extends Activity {
     private List<AppEntry> apps = new ArrayList<>();
     private String appsSignature = "";
     private TerminalHome term;
-    private long startedAt;
 
     private final Runnable ticker = new Runnable() {
         @Override
@@ -101,12 +97,6 @@ public class MainActivity extends Activity {
     }
 
     @Override
-    protected void onStart() {
-        super.onStart();
-        startedAt = SystemClock.uptimeMillis();
-    }
-
-    @Override
     protected void onResume() {
         super.onResume();
         hideStatusBar();
@@ -147,28 +137,9 @@ public class MainActivity extends Activity {
     }
 
     @Override
-    protected void onNewIntent(Intent intent) {
-        super.onNewIntent(intent);
-        // Coming back from another app keeps everything where it was.
-        // Pressing Home while already here goes back to the app list.
-        boolean returningFromApp = SystemClock.uptimeMillis() - startedAt < 1500;
-        if (term != null && !returningFromApp) term.onHomePressed();
-    }
-
-    @Override
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
-        if (term != null) term.onBack();
-    }
-
-    @Override
-    @SuppressWarnings("deprecation")
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == LauncherSettings.REQUEST_HOME_ROLE && resultCode != RESULT_OK
-                && !LauncherSettings.isDefaultHome(this)) {
-            AppActions.openSettings(this, Settings.ACTION_HOME_SETTINGS);
-        }
+        if (term == null || !term.onBack()) super.onBackPressed();
     }
 
     @Override

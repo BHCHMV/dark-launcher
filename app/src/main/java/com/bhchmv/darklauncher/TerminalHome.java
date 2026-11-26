@@ -46,7 +46,7 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
- * The whole launcher: a Linux-terminal home screen with three tabs
+ * The whole app: a Linux-terminal screen with tabs
  * (apps / settings / system) and a swipe-down quick panel.
  */
 final class TerminalHome {
@@ -489,7 +489,7 @@ final class TerminalHome {
         clearOut();
         busy = true;
         List<Runnable> steps = new ArrayList<>();
-        steps.add(() -> line("darkOS 1.2 (tty1) on " + Build.MANUFACTURER + " " + Build.MODEL, GRAY));
+        steps.add(() -> line("darkOS 1.3 (tty1) on " + Build.MANUFACTURER + " " + Build.MODEL, GRAY));
         steps.add(() -> line("[  OK  ] mounted /home/a55", DIM));
         steps.add(() -> line("[  OK  ] indexed " + a.getApps().size() + " apps", DIM));
         steps.add(() -> line("[  OK  ] started dark shell", DIM));
@@ -503,10 +503,6 @@ final class TerminalHome {
         steps.add(() -> line("  tap + in the tab bar to make your own tab", GRAY));
         steps.add(() -> {
             busy = false;
-            if (!LauncherSettings.isDefaultHome(a)) {
-                blank();
-                option("h", "sethome", "make darkOS your home screen", () -> LauncherSettings.requestHome(a));
-            }
             typeAndRun(TAB_CMDS[0], () -> renderApps(null));
         });
         for (int i = 0; i < steps.size(); i++) h.postDelayed(steps.get(i), i * 50L);
@@ -926,8 +922,6 @@ final class TerminalHome {
         });
 
         section("LAUNCHER");
-        option("h", "sethome", LauncherSettings.isDefaultHome(a) ? "already your home screen"
-                : "make darkOS your home screen", () -> LauncherSettings.requestHome(a));
         option("z", "sort", "sort apps A-Z (resets your order)", () -> {
             a.sortApps();
             line("[  OK  ] apps sorted A-Z", DIM);
@@ -1024,7 +1018,7 @@ final class TerminalHome {
                 {"battery, date", "quick info"},
                 {"newtab", "make your own tab"},
                 {"lock", "terminal lock screen"},
-                {"sethome", "make darkOS your home"},
+                {"exit", "close darkOS"},
                 {"clear", "redraw this tab"},
         };
         for (String[] c : cmds) line(String.format(Locale.US, "  %-14s %s", c[0], c[1]), WHITE);
@@ -1127,7 +1121,6 @@ final class TerminalHome {
             case "open": case "run": case "launch": open(arg); return;
             case "panel": case "quick": openPanel(); return;
             case "notify": case "notifications": notifications(); return;
-            case "sethome": LauncherSettings.requestHome(a); return;
             case "newtab": case "mkdir": newTab(); return;
             case "lock": case "lockscreen": setLock(LockScreen.STYLE_MATRIX); return;
             case "torch": case "flashlight": case "flash":
@@ -1148,7 +1141,10 @@ final class TerminalHome {
                 AppActions.openSettings(a, Settings.ACTION_BLUETOOTH_SETTINGS);
                 return;
             case "sudo": line("  [sudo] nice try.", YELLOW); return;
-            case "exit": case "logout": line("  this is your home screen — nowhere to exit to :)", YELLOW); return;
+            case "exit": case "logout": case "quit":
+                line("  logout", GRAY);
+                h.postDelayed(a::finish, 250);
+                return;
             case "reboot": case "shutdown": line("  permission denied: hold the power button for that", RED); return;
             default:
                 List<AppEntry> found = AppRepository.find(a.getApps(), c);
@@ -1208,7 +1204,8 @@ final class TerminalHome {
         }
     }
 
-    void onBack() {
+    /** @return false when there's nothing to go back to, so the app should close. */
+    boolean onBack() {
         hideKeyboard();
         if (panelOpen) {
             closePanel();
@@ -1218,16 +1215,10 @@ final class TerminalHome {
             showTab(tab, false);
         } else if (tab != 0) {
             showTab(0, true);
+        } else {
+            return false;
         }
-    }
-
-    /** Home pressed while already on the home screen. */
-    void onHomePressed() {
-        hideKeyboard();
-        closePanel();
-        if (busy) return;
-        if (tab != 0 || inAppMenu) showTab(0, false);
-        else scroll.smoothScrollTo(0, 0);
+        return true;
     }
 
     private void hideKeyboard() {
